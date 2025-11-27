@@ -43,7 +43,7 @@ def upload_to_imgbb(file_obj):
 TUTOREN_LISTE = ["Sami", "Lucas", "Sun", "Consti", "Denice","Duc","Gramos","Irmak","Kristina","Lim","Oumaima","Zhouyu","Amelie","Anna","Lisa","Rion","Sophie","Valeria"]
 
 st.set_page_config(page_title="Tutoren Buchhaltung", layout="wide")
-st.title("💰 Buchhaltung Tutorenkasse")
+st.title("Buchhaltung Tutorenkasse")
 
 # Verbindung zu Google Sheets
 conn = st.connection("gsheets", type=GSheetsConnection)
@@ -117,7 +117,7 @@ with tab1:
         st.info("Wichtig: Beleg als Bild hochladen (jpg, png)!")
         with st.form("entry_form"):
             tutor_name = st.selectbox("Dein Name", sorted(TUTOREN_LISTE))
-            event_type = st.selectbox("Event Typ", ["Kochabend", "Backtag", "Getränkeeinkauf", "Getränkeverkauf", "Bereichsfest", "GAP Verleih"])
+            event_type = st.selectbox("Event Typ", ["Kochabend", "Backtag", "Getränkeeinkauf", "Getränkeverkauf", "Bereichsfest", "GAP Verleih", "Kassensturz"])
             date = st.date_input("Datum", datetime.today(), format="DD/MM/YYYY")
             
             c1, c2 = st.columns(2)
