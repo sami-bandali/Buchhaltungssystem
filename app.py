@@ -185,9 +185,15 @@ with tab1:
         st.divider()
         st.subheader("📈 Kassenstand-Verlauf")
         
-        # Chart Daten vorbereiten (Datum sortieren ist wichtig für die Linie)
-        chart_data = df.sort_values("Datum")[["Datum", "Kassenstand"]].set_index("Datum")
-        st.line_chart(chart_data, color="#2E8B57")
+        # Chart Daten vorbereiten
+        # 1. Nach Datum sortieren und Index resetten (erzeugt 0, 1, 2...)
+        chart_df = df.sort_values("Datum").reset_index(drop=True)
+        
+        # 2. Index um 1 erhöhen (damit die X-Achse bei 1 anfängt, nicht bei 0)
+        chart_df.index = chart_df.index + 1
+        
+        # 3. Streamlit nimmt automatisch den Index als X-Achse
+        st.line_chart(chart_df["Kassenstand"], color="#2E8B57")
 
 # === TAB 2: NUR ADMIN (Nur anzeigen, wenn tab2 existiert) ===
 if tab2 is not None:
