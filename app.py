@@ -117,7 +117,7 @@ with tab1:
         st.info("Wichtig: Beleg als Bild hochladen (jpg, png)!")
         with st.form("entry_form"):
             tutor_name = st.selectbox("Dein Name", sorted(TUTOREN_LISTE))
-            event_type = st.selectbox("Event Typ", ["Kochabend", "Backtag", "Getränkeeinkauf", "Getränkeverkauf", "Bereichsfest", "GAP Verleih", "Kassensturz"])
+            event_type = st.selectbox("Event Typ", ["Kochabend", "Backtag", "Getränkeeinkauf", "Getränkeverkauf", "Bereichsfest", "GAP Verleih", "Kassensturz", "Wohnheimsfrühstück", "Sonstiges"])
             date = st.date_input("Datum", datetime.today(), format="DD/MM/YYYY")
             
             c1, c2 = st.columns(2)
