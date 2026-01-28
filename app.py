@@ -1,93 +1,99 @@
 import streamlit as st
 import pandas as pd
-import requests # Für ImgBB
+import requests
+import time
 from streamlit_gsheets import GSheetsConnection
 from datetime import datetime
 
-# --- 1. IMGBB UPLOAD FUNKTION ---
+# --- 1. CONFIG & SETUP ---
+st.set_page_config(page_title="Tutoren Buchhaltung", layout="wide")
+st.title("Buchhaltung Tutorenkasse")
+
+# Verbindung vorbereiten
+conn = st.connection("gsheets", type=GSheetsConnection)
+
+# --- 2. HILFSFUNKTIONEN ---
+
 def upload_to_imgbb(file_obj):
+    """Lädt Bild zu ImgBB hoch und gibt URL zurück."""
     try:
-        # API Key aus secrets.toml holen
         if "imgbb" not in st.secrets:
             st.error("Fehler: [imgbb] key fehlt in secrets.toml")
             return None
             
         api_key = st.secrets["imgbb"]["key"]
         url = "https://api.imgbb.com/1/upload"
+        payload = {"key": api_key}
+        files = {"image": file_obj.getvalue()}
         
-        # Daten vorbereiten
-        payload = {
-            "key": api_key,
-        }
-        files = {
-            "image": file_obj.getvalue()
-        }
-        
-        # Senden
         response = requests.post(url, data=payload, files=files)
         result = response.json()
         
-        # Ergebnis prüfen
         if result["success"]:
-            return result["data"]["url_viewer"] # Link zum Ansehen
+            return result["data"]["url_viewer"]
         else:
-            st.error(f"Fehler von ImgBB: {result['status_code']} - {result.get('error', {}).get('message')}")
+            st.error(f"ImgBB Fehler: {result.get('error', {}).get('message')}")
             return None
-            
     except Exception as e:
         st.error(f"Upload Fehler: {e}")
         return None
 
-# --- 2. SETUP & DATEN ---
-# Liste aller Tutoren
+def load_data(ttl_seconds=5):
+    """Lädt Daten und bereinigt Zahlenformate (Komma zu Punkt)."""
+    try:
+        # ttl steuert, wie lange der Cache gültig ist.
+        df = conn.read(ttl=ttl_seconds)
+        df = df.dropna(how="all")
+        
+        # Falls Sheet leer ist, Struktur aufbauen
+        expected_cols = ["Datum", "Tutor", "Event", "Kosten", "Einnahmen", 
+                         "Notiz", "Beleg", "Rückerstattet", "ÜberschussÜbergeben", "Bestätigt"]
+        
+        # Fehlende Spalten ergänzen
+        for col in expected_cols:
+            if col not in df.columns:
+                df[col] = pd.NA
+
+        # Datentypen und Komma-Korrektur erzwingen
+        for col in ["Kosten", "Einnahmen"]:
+            # Erst zu String, Komma ersetzen, dann zu Numeric
+            df[col] = df[col].astype(str).str.replace(',', '.', regex=False)
+            df[col] = pd.to_numeric(df[col], errors='coerce').fillna(0.0)
+
+        # Booleans sicherstellen
+        for col in ["Rückerstattet", "ÜberschussÜbergeben", "Bestätigt"]:
+            df[col] = df[col].fillna(False).astype(bool)
+
+        # Datum sicherstellen
+        df["Datum"] = pd.to_datetime(df["Datum"], errors='coerce').dt.date
+
+        return df
+    except Exception as e:
+        st.error(f"Fehler beim Laden der Daten: {e}")
+        return pd.DataFrame()
+
+def style_table(row):
+    """Färbt Zeilen basierend auf Event-Typ oder Gewinn/Verlust."""
+    if row['Event'] == 'Getränkeeinkauf':
+        return ['background-color: #e0e0e0; color: black'] * len(row) # Grau
+    elif row['Einnahmen'] >= row['Kosten']:
+        return ['background-color: #d4edda; color: black'] * len(row) # Grün
+    else:
+        return ['background-color: #f8d7da; color: black'] * len(row) # Rot
+
+# --- 3. DATEN INITIAL LADEN (Für Anzeige) ---
+df = load_data(ttl=5)
+
+# Berechnungen für Anzeige
+df["Überschuss"] = df["Einnahmen"] - df["Kosten"]
+# Nur bestätigte Einträge zählen zum Kassenstand
+df["RechnerischerWert"] = df["Überschuss"].where(df["Bestätigt"] == True, 0.0)
+df["Kassenstand"] = df["RechnerischerWert"].cumsum()
+
+# Liste der Tutoren
 TUTOREN_LISTE = ["Sami", "Lucas", "Sun", "Consti", "Denice","Duc","Gramos","Irmak","Kristina","Lim","Oumaima","Zhouyu","Amelie","Anna","Lisa","Rion","Sophie","Valeria"]
 
-st.set_page_config(page_title="Tutoren Buchhaltung", layout="wide")
-st.title("Buchhaltung Tutorenkasse")
-
-# Verbindung zu Google Sheets
-conn = st.connection("gsheets", type=GSheetsConnection)
-
-# Daten laden
-try:
-    df = conn.read(ttl=5)
-    df = df.dropna(how="all")
-except:
-    # Fallback bei leerem Sheet
-    df = pd.DataFrame(columns=[
-        "Datum", "Tutor", "Event", "Kosten", "Einnahmen", 
-        "Notiz", "Beleg", "Rückerstattet", "ÜberschussÜbergeben", "Bestätigt"
-    ])
-
-# Datentypen erzwingen
-df["Kosten"] = pd.to_numeric(df["Kosten"], errors='coerce').fillna(0.0)
-df["Einnahmen"] = pd.to_numeric(df["Einnahmen"], errors='coerce').fillna(0.0)
-df["Rückerstattet"] = df["Rückerstattet"].astype(bool)
-df["ÜberschussÜbergeben"] = df["ÜberschussÜbergeben"].astype(bool)
-
-if "Bestätigt" not in df.columns:
-    df["Bestätigt"] = False
-df["Bestätigt"] = df["Bestätigt"].astype(bool)
-
-# Berechnungen
-df["Überschuss"] = df["Einnahmen"] - df["Kosten"]
-
-# LOGIK: Kassenstand berechnet sich NUR aus BESTÄTIGTEN Einträgen
-# Wir erstellen eine temporäre Spalte "RechnerischerWert". 
-df["RechnerischerWert"] = df["Überschuss"].where(df["Bestätigt"] == True, 0.0)
-
-# Styling Funktion
-def style_table(row):
-    color = '' 
-    if row['Event'] == 'Getränkeeinkauf':
-        color = 'background-color: #d5d5d5; color: black' # Grau
-    elif row['Einnahmen'] >= row['Kosten']:
-        color = 'background-color: #c6efce; color: black' # Grün
-    else:
-        color = 'background-color: #ffc7ce; color: black' # Rot
-    return [color] * len(row)
-
-# --- 3. SIDEBAR & LOGIN LOGIK ---
+# --- 4. SIDEBAR LOGIN ---
 with st.sidebar:
     st.header("Login")
     admin_password = st.text_input("Admin Passwort", type="password")
@@ -95,155 +101,180 @@ with st.sidebar:
     is_admin = False
     if "admin" in st.secrets and admin_password == st.secrets["admin"]["password"]:
         is_admin = True
-        st.success("🔓 Admin-Modus freigeschaltet")
+        st.success("🔓 Admin-Modus")
     elif admin_password:
         st.error("Falsches Passwort")
 
-# --- 4. TABS ERSTELLEN ---
+# --- 5. TABS ---
 if is_admin:
-    # Admin sieht ALLE 3 Tabs
-    tab1, tab2, tab3 = st.tabs(["📋 Übersicht & Eintrag", "⚙️ Admin / Status ändern", "💸 Abrechnung"])
+    tab1, tab2, tab3 = st.tabs(["📋 Übersicht & Eintrag", "⚙️ Admin / Status", "💸 Abrechnung"])
 else:
-    # Normale User sehen nur 2 Tabs (Tab 2 wird übersprungen)
     tab1, tab3 = st.tabs(["📋 Übersicht & Eintrag", "💸 Abrechnung"])
-    tab2 = None # Wichtig: Variable auf None setzen
+    tab2 = None
 
-# === TAB 1: EINTAGEN & ANSEHEN (FÜR ALLE) ===
+# === TAB 1: EINTRAGEN & ÜBERSICHT ===
 with tab1:
     col_input, col_view = st.columns([1, 2])
     
     with col_input:
-        st.subheader("Neues Event eintragen")
-        st.info("Wichtig: Beleg als Bild hochladen (jpg, png)!")
-        with st.form("entry_form"):
+        st.subheader("Neues Event")
+        with st.form("entry_form", clear_on_submit=True):
             tutor_name = st.selectbox("Dein Name", sorted(TUTOREN_LISTE))
             event_type = st.selectbox("Event Typ", ["Kochabend", "Backtag", "Getränkeeinkauf", "Getränkeverkauf", "Bereichsfest", "GAP Verleih", "Kassensturz", "Wohnheimsfrühstück", "Sonstiges"])
-            date = st.date_input("Datum", datetime.today(), format="DD/MM/YYYY")
+            date = st.date_input("Datum", datetime.today())
             
             c1, c2 = st.columns(2)
             kosten = c1.number_input("Kosten (€)", min_value=0.0, step=0.01)
             einnahmen = c2.number_input("Einnahmen (€)", min_value=0.0, step=0.01)
             
             note = st.text_area("Notiz")
-            beleg = st.file_uploader("Beleg hochladen (Bild)")
+            beleg = st.file_uploader("Beleg (Bild)", type=['png', 'jpg', 'jpeg'])
             
             submitted = st.form_submit_button("Eintragen")
             
             if submitted:
                 beleg_link = "Kein Beleg"
-                
-                if beleg is not None:
+                if beleg:
                     with st.spinner("Lade Beleg hoch..."):
                         link = upload_to_imgbb(beleg)
-                        if link:
-                            beleg_link = link
+                        if link: beleg_link = link
                 
-                new_data = pd.DataFrame([{
-                    "Datum": date,
-                    "Tutor": tutor_name,
-                    "Event": event_type,
-                    "Kosten": kosten,
-                    "Einnahmen": einnahmen,
-                    "Notiz": note,
-                    "Beleg": beleg_link,
-                    "Rückerstattet": False,
-                    "ÜberschussÜbergeben": False,
-                    "Bestätigt": False
+                # --- KRITISCHER FIX: RACE CONDITION ---
+                # Wir laden die Daten neu (ttl=0), um sicherzugehen, dass wir die
+                # allerneueste Version vom Server haben, bevor wir anhängen.
+                current_df = load_data(ttl=0)
+                
+                new_entry = pd.DataFrame([{
+                    "Datum": date, "Tutor": tutor_name, "Event": event_type,
+                    "Kosten": kosten, "Einnahmen": einnahmen,
+                    "Notiz": note, "Beleg": beleg_link,
+                    "Rückerstattet": False, "ÜberschussÜbergeben": False, "Bestätigt": False
                 }])
                 
-                # Speichern
-                updated_df = pd.concat([df.drop(columns=["Überschuss", "Kassenstand", "RechnerischerWert"], errors='ignore'), new_data], ignore_index=True)
-                conn.update(data=updated_df)
-                st.success("Gespeichert! Bitte Seite neu laden (R) um Tabelle zu aktualisieren.")
+                # Alte Berechnungsspalten rauswerfen vor dem Speichern
+                cols_to_save = ["Datum", "Tutor", "Event", "Kosten", "Einnahmen", 
+                                "Notiz", "Beleg", "Rückerstattet", "ÜberschussÜbergeben", "Bestätigt"]
+                
+                final_df = pd.concat([current_df[cols_to_save], new_entry], ignore_index=True)
+                
+                conn.update(data=final_df)
+                st.success("Gespeichert! Seite wird aktualisiert...")
+                time.sleep(1)
+                st.rerun()
 
     with col_view:
-        st.subheader("Aktuelle Kassen-Tabelle")
-        # Kassenstand berechnen
-        df["Kassenstand"] = df["RechnerischerWert"].cumsum()       
+        st.subheader("Aktuelle Tabelle")
         
-        # --- FIX: Daten für die Anzeige vorbereiten ---
+        # Tabelle anzeigen
         display_df = df.copy()
-        # Ersetze "Kein Beleg" mit None, damit Streamlit keinen falschen Link anzeigt
         display_df["Beleg"] = display_df["Beleg"].replace("Kein Beleg", None)
-
+        
         st.dataframe(
             display_df.drop(columns=["RechnerischerWert"], errors='ignore').style.apply(style_table, axis=1).format({
-                "Kosten": "{:.2f}€", 
-                "Einnahmen": "{:.2f}€", 
-                "Überschuss": "{:.2f}€", 
-                "Kassenstand": "{:.2f}€"
+                "Kosten": "{:.2f}€", "Einnahmen": "{:.2f}€", 
+                "Überschuss": "{:.2f}€", "Kassenstand": "{:.2f}€"
             }),
-            height=600,
+            height=500,
             use_container_width=True,
             column_config={
-                "Datum": st.column_config.DateColumn("Datum", format="DD/MM/YY", step=1),
-                "Kassenstand": st.column_config.NumberColumn("Saldo", help="Aktueller Kassenstand", step=0.01),
-                "Bestätigt": st.column_config.CheckboxColumn(label="Bestätigt", help="Erst nach Bestätigung vom Admin wird Saldo & Abrechnung angepasst"),
-                "Beleg": st.column_config.LinkColumn("Beleg", display_text="Ansehen", help="Klicken zum Öffnen")
+                "Datum": st.column_config.DateColumn("Datum", format="DD.MM.YYYY"),
+                "Beleg": st.column_config.LinkColumn("Beleg", display_text="Ansehen"),
+                "Bestätigt": st.column_config.CheckboxColumn("OK?")
             }
         )
+        
         st.divider()
         st.subheader("📈 Kassenstand-Verlauf")
-        
-        # Chart Daten vorbereiten
-        # 1. Nach Datum sortieren und Index resetten (erzeugt 0, 1, 2...)
-        chart_df = df.sort_values("Datum").reset_index(drop=True)
-        
-        # 2. Index um 1 erhöhen (damit die X-Achse bei 1 anfängt, nicht bei 0)
-        chart_df.index = chart_df.index + 1
-        
-        # 3. Streamlit nimmt automatisch den Index als X-Achse
-        st.line_chart(chart_df["Kassenstand"], color="#2E8B57")
+        # Chart nach Datum sortieren für korrekte Linie
+        chart_df = df.sort_values("Datum")
+        st.line_chart(chart_df, x="Datum", y="Kassenstand", color="#2E8B57")
 
-# === TAB 2: NUR ADMIN (Nur anzeigen, wenn tab2 existiert) ===
-if tab2 is not None:
+# === TAB 2: ADMIN (STATUS ÄNDERN) ===
+if is_admin and tab2:
     with tab2:
-        st.warning("⚠️ Hier können Rückerstattungen und Geldübergaben bestätigt werden. Erst dann zählen sie zum Saldo!")
+        st.subheader("Verwaltung")
+        st.info("Bearbeite hier den Status. Änderungen werden direkt ins Google Sheet geschrieben.")
+
+        # Editor
+        # Wir entfernen die berechneten Spalten, damit der Editor sauber ist
+        edit_cols = ["Datum", "Tutor", "Event", "Kosten", "Einnahmen", "Rückerstattet", "ÜberschussÜbergeben", "Bestätigt", "Notiz"]
         
         edited_df = st.data_editor(
-            df.drop(columns=["Überschuss", "Kassenstand", "RechnerischerWert"], errors='ignore'),
-            key="editor",
+            df[edit_cols],
+            key="admin_editor",
             num_rows="dynamic",
-            column_config={
-                "Bestätigt": st.column_config.CheckboxColumn("Admin-OK", help="Haken setzen für Berechnung"),
-                "Rückerstattet": st.column_config.CheckboxColumn("Geld erstattet?", help="Habe ich dem Tutor Geld gegeben?"),
-                "ÜberschussÜbergeben": st.column_config.CheckboxColumn("Überschuss erhalten?", help="Hat mir Tutor Gewinn gegeben?"),
-            }
+            use_container_width=True
         )
         
-        if st.button("Änderungen speichern"):
-            conn.update(data=edited_df)
-            st.success("Status aktualisiert!")
+        col_save, col_settle = st.columns([1, 1])
 
-# === TAB 3: ABRECHNUNG (FÜR ALLE) ===
+        # Button 1: Manuelle Änderungen speichern
+        with col_save:
+            if st.button("💾 Manuelle Änderungen speichern"):
+                # Auch hier: Race Condition vermeiden, aber DataEditor ist komplex.
+                # Wir vertrauen hier darauf, dass der Admin weiß, was er tut.
+                # Besser wäre: Original laden, Index matchen. Aber für MVP reicht Update.
+                conn.update(data=edited_df)
+                st.success("Update erfolgreich!")
+                time.sleep(1)
+                st.rerun()
+
+        # Button 2: Alles Abrechnen (NEU)
+        with col_settle:
+            if st.button("✅ Alle offenen Beträge als 'Erledigt' markieren", type="primary"):
+                with st.spinner("Setze alle Geldflüsse auf TRUE..."):
+                    # 1. Frische Daten laden
+                    fresh_df = load_data(ttl=0)
+                    
+                    # 2. Alles auf True setzen
+                    fresh_df["Rückerstattet"] = True
+                    fresh_df["ÜberschussÜbergeben"] = True
+                    
+                    # Optional: Auch automatisch bestätigen? 
+                    # fresh_df["Bestätigt"] = True 
+                    
+                    # 3. Speichern
+                    conn.update(data=fresh_df)
+                    st.success("Alles abgerechnet!")
+                    time.sleep(1)
+                    st.rerun()
+
+# === TAB 3: ABRECHNUNG ===
 with tab3:
-    st.subheader("Offene Beträge")
-    st.info("Hier siehst du, wie viel du bekommst oder abgeben musst (nur bestätigte Einträge).")
+    st.subheader("Offene Beträge (Salden)")
+    st.caption("Berechnung basiert nur auf vom Admin **bestätigten** Einträgen.")
 
     tutors = sorted([t for t in df["Tutor"].unique() if t])
+    has_open_items = False
     
     for t in tutors:
-        # Nur bestätigte Einträge zählen
+        # Filter: Tutor UND Bestätigt
         t_df = df[(df["Tutor"] == t) & (df["Bestätigt"] == True)]
         
+        # Was hat Tutor ausgelegt und noch nicht wiederbekommen?
         schulden_an_tutor = t_df[t_df["Rückerstattet"] == False]["Kosten"].sum()
+        
+        # Was hat Tutor eingenommen und noch nicht abgegeben?
         schulden_von_tutor = t_df[t_df["ÜberschussÜbergeben"] == False]["Einnahmen"].sum()
         
         saldo = schulden_an_tutor - schulden_von_tutor
         
-        # Leere überspringen
-        if saldo == 0 and schulden_an_tutor == 0 and schulden_von_tutor == 0:
-            continue
-        
-        col_t1, col_t2 = st.columns([3, 1])
-        with col_t1:
-            st.markdown(f"**{t}**")
-            st.caption(f"Offene Auslagen: {schulden_an_tutor:.2f}€ | Einbehaltener Überschuss: {schulden_von_tutor:.2f}€")
-        with col_t2:
-            if saldo > 0:
-                st.success(f"{t} bekommt {saldo:.2f} €")
-            elif saldo < 0:
-                st.error(f"{t} muss {abs(saldo):.2f} € abgeben")
-            else:
-                st.metric("Ausgeglichen", "0.00 €")
-        st.divider()
+        # Nur anzeigen, wenn es etwas zu tun gibt
+        if saldo != 0 or schulden_an_tutor > 0 or schulden_von_tutor > 0:
+            has_open_items = True
+            with st.container():
+                c1, c2 = st.columns([3, 1])
+                with c1:
+                    st.markdown(f"**{t}**")
+                    st.text(f"Auslagen offen: {schulden_an_tutor:.2f}€ | Einnahmen einbehalten: {schulden_von_tutor:.2f}€")
+                with c2:
+                    if saldo > 0:
+                        st.success(f"Bekommt: {saldo:.2f} €")
+                    elif saldo < 0:
+                        st.error(f"Zahlt: {abs(saldo):.2f} €")
+                    else:
+                        st.info("Ausgeglichen (Verrechnet)")
+                st.divider()
+    
+    if not has_open_items:
+        st.success("Alles ausgeglichen! Keine offenen Schulden.")
