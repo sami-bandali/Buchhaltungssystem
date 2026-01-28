@@ -38,11 +38,12 @@ def upload_to_imgbb(file_obj):
         st.error(f"Upload Fehler: {e}")
         return None
 
-def load_data(ttl_seconds=5):
+# KORREKTUR HIER: Parameter heißt jetzt 'ttl' statt 'ttl_seconds'
+def load_data(ttl=5):
     """Lädt Daten und bereinigt Zahlenformate (Komma zu Punkt)."""
     try:
         # ttl steuert, wie lange der Cache gültig ist.
-        df = conn.read(ttl=ttl_seconds)
+        df = conn.read(ttl=ttl)
         df = df.dropna(how="all")
         
         # Falls Sheet leer ist, Struktur aufbauen
@@ -139,9 +140,8 @@ with tab1:
                         link = upload_to_imgbb(beleg)
                         if link: beleg_link = link
                 
-                # --- KRITISCHER FIX: RACE CONDITION ---
-                # Wir laden die Daten neu (ttl=0), um sicherzugehen, dass wir die
-                # allerneueste Version vom Server haben, bevor wir anhängen.
+                # --- FIX: RACE CONDITION ---
+                # Daten frisch laden mit ttl=0
                 current_df = load_data(ttl=0)
                 
                 new_entry = pd.DataFrame([{
@@ -185,7 +185,7 @@ with tab1:
         
         st.divider()
         st.subheader("📈 Kassenstand-Verlauf")
-        # Chart nach Datum sortieren für korrekte Linie
+        # Chart nach Datum sortieren
         chart_df = df.sort_values("Datum")
         st.line_chart(chart_df, x="Datum", y="Kassenstand", color="#2E8B57")
 
@@ -196,7 +196,6 @@ if is_admin and tab2:
         st.info("Bearbeite hier den Status. Änderungen werden direkt ins Google Sheet geschrieben.")
 
         # Editor
-        # Wir entfernen die berechneten Spalten, damit der Editor sauber ist
         edit_cols = ["Datum", "Tutor", "Event", "Kosten", "Einnahmen", "Rückerstattet", "ÜberschussÜbergeben", "Bestätigt", "Notiz"]
         
         edited_df = st.data_editor(
@@ -211,15 +210,12 @@ if is_admin and tab2:
         # Button 1: Manuelle Änderungen speichern
         with col_save:
             if st.button("💾 Manuelle Änderungen speichern"):
-                # Auch hier: Race Condition vermeiden, aber DataEditor ist komplex.
-                # Wir vertrauen hier darauf, dass der Admin weiß, was er tut.
-                # Besser wäre: Original laden, Index matchen. Aber für MVP reicht Update.
                 conn.update(data=edited_df)
                 st.success("Update erfolgreich!")
                 time.sleep(1)
                 st.rerun()
 
-        # Button 2: Alles Abrechnen (NEU)
+        # Button 2: Alles Abrechnen
         with col_settle:
             if st.button("✅ Alle offenen Beträge als 'Erledigt' markieren", type="primary"):
                 with st.spinner("Setze alle Geldflüsse auf TRUE..."):
@@ -229,9 +225,6 @@ if is_admin and tab2:
                     # 2. Alles auf True setzen
                     fresh_df["Rückerstattet"] = True
                     fresh_df["ÜberschussÜbergeben"] = True
-                    
-                    # Optional: Auch automatisch bestätigen? 
-                    # fresh_df["Bestätigt"] = True 
                     
                     # 3. Speichern
                     conn.update(data=fresh_df)
