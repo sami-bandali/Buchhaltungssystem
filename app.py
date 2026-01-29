@@ -38,43 +38,61 @@ def upload_to_imgbb(file_obj):
         st.error(f"Upload Fehler: {e}")
         return None
 
-# KORREKTUR HIER: Parameter heißt jetzt 'ttl' statt 'ttl_seconds'
 def load_data(ttl=5):
-    """Lädt Daten und bereinigt Zahlenformate (Komma zu Punkt)."""
+    """Lädt Daten, bereinigt Spalten und repariert Datentypen."""
     try:
-        # ttl steuert, wie lange der Cache gültig ist.
         df = conn.read(ttl=ttl)
+        
+        # 1. Leere Zeilen entfernen
         df = df.dropna(how="all")
         
-        # Falls Sheet leer ist, Struktur aufbauen
+        # 2. Geister-Spalten entfernen (Spalte 10, Unnamed: 0, etc.)
+        # Wir behalten nur Spalten, die wir wirklich erwarten/wollen
         expected_cols = ["Datum", "Tutor", "Event", "Kosten", "Einnahmen", 
                          "Notiz", "Beleg", "Rückerstattet", "ÜberschussÜbergeben", "Bestätigt"]
         
-        # Fehlende Spalten ergänzen
+        # Falls Spalten im Sheet fehlen, fügen wir sie hinzu
         for col in expected_cols:
             if col not in df.columns:
                 df[col] = pd.NA
+                
+        # Wir filtern das DF, sodass nur unsere definierten Spalten übrig bleiben
+        # Das löscht "Spalte 10" oder "Unnamed: 0" aus dem Speicher
+        df = df[expected_cols]
 
-        # Datentypen und Komma-Korrektur erzwingen
+        # 3. Zahlenformat reparieren (Komma zu Punkt)
         for col in ["Kosten", "Einnahmen"]:
-            # Erst zu String, Komma ersetzen, dann zu Numeric
             df[col] = df[col].astype(str).str.replace(',', '.', regex=False)
             df[col] = pd.to_numeric(df[col], errors='coerce').fillna(0.0)
 
-        # Booleans sicherstellen
+        # 4. Booleans sicherstellen
         for col in ["Rückerstattet", "ÜberschussÜbergeben", "Bestätigt"]:
             df[col] = df[col].fillna(False).astype(bool)
 
-        # Datum sicherstellen
+        # 5. Datum sicherstellen
         df["Datum"] = pd.to_datetime(df["Datum"], errors='coerce').dt.date
+
+        # 6. Belege reparieren (WICHTIG für Anzeige)
+        # Alles zu String machen, damit keine Floats (NaN) drin sind
+        df["Beleg"] = df["Beleg"].astype(str)
+        # Strings, die "nan", "None", oder "Kein Beleg" heißen, durch echtes None ersetzen
+        # Damit Streamlit den Link einfach ausblendet statt Fehler zu werfen
+        replace_values = ["nan", "None", "Kein Beleg", "", "<NA>"]
+        df["Beleg"] = df["Beleg"].replace(replace_values, None)
 
         return df
     except Exception as e:
         st.error(f"Fehler beim Laden der Daten: {e}")
-        return pd.DataFrame()
+        # Leeres DF zurückgeben, damit App nicht abstürzt
+        return pd.DataFrame(columns=["Datum", "Tutor", "Event", "Kosten", "Einnahmen", 
+                                     "Notiz", "Beleg", "Rückerstattet", "ÜberschussÜbergeben", "Bestätigt"])
 
 def style_table(row):
     """Färbt Zeilen basierend auf Event-Typ oder Gewinn/Verlust."""
+    # Safety Check: Falls Zeile leer ist
+    if pd.isna(row.get('Event')):
+        return [''] * len(row)
+
     if row['Event'] == 'Getränkeeinkauf':
         return ['background-color: #e0e0e0; color: black'] * len(row) # Grau
     elif row['Einnahmen'] >= row['Kosten']:
@@ -134,14 +152,13 @@ with tab1:
             submitted = st.form_submit_button("Eintragen")
             
             if submitted:
-                beleg_link = "Kein Beleg"
+                beleg_link = "Kein Beleg" # Interner Platzhalter
                 if beleg:
                     with st.spinner("Lade Beleg hoch..."):
                         link = upload_to_imgbb(beleg)
                         if link: beleg_link = link
                 
                 # --- FIX: RACE CONDITION ---
-                # Daten frisch laden mit ttl=0
                 current_df = load_data(ttl=0)
                 
                 new_entry = pd.DataFrame([{
@@ -151,7 +168,7 @@ with tab1:
                     "Rückerstattet": False, "ÜberschussÜbergeben": False, "Bestätigt": False
                 }])
                 
-                # Alte Berechnungsspalten rauswerfen vor dem Speichern
+                # Alte Berechnungsspalten rauswerfen
                 cols_to_save = ["Datum", "Tutor", "Event", "Kosten", "Einnahmen", 
                                 "Notiz", "Beleg", "Rückerstattet", "ÜberschussÜbergeben", "Bestätigt"]
                 
@@ -165,10 +182,10 @@ with tab1:
     with col_view:
         st.subheader("Aktuelle Tabelle")
         
-        # Tabelle anzeigen
+        # Tabelle anzeigen (Kopie für Anzeige erstellen)
         display_df = df.copy()
-        display_df["Beleg"] = display_df["Beleg"].replace("Kein Beleg", None)
         
+        # Style Funktion anwenden und formatieren
         st.dataframe(
             display_df.drop(columns=["RechnerischerWert"], errors='ignore').style.apply(style_table, axis=1).format({
                 "Kosten": "{:.2f}€", "Einnahmen": "{:.2f}€", 
@@ -185,9 +202,9 @@ with tab1:
         
         st.divider()
         st.subheader("📈 Kassenstand-Verlauf")
-        # Chart nach Datum sortieren
-        chart_df = df.sort_values("Datum")
-        st.line_chart(chart_df, x="Datum", y="Kassenstand", color="#2E8B57")
+        if not df.empty:
+            chart_df = df.sort_values("Datum")
+            st.line_chart(chart_df, x="Datum", y="Kassenstand", color="#2E8B57")
 
 # === TAB 2: ADMIN (STATUS ÄNDERN) ===
 if is_admin and tab2:
@@ -198,76 +215,87 @@ if is_admin and tab2:
         # Editor
         edit_cols = ["Datum", "Tutor", "Event", "Kosten", "Einnahmen", "Rückerstattet", "ÜberschussÜbergeben", "Bestätigt", "Notiz"]
         
-        edited_df = st.data_editor(
-            df[edit_cols],
-            key="admin_editor",
-            num_rows="dynamic",
-            use_container_width=True
-        )
-        
-        col_save, col_settle = st.columns([1, 1])
+        # Sicherstellen, dass wir Daten haben
+        if not df.empty:
+            edited_df = st.data_editor(
+                df[edit_cols],
+                key="admin_editor",
+                num_rows="dynamic",
+                use_container_width=True
+            )
+            
+            col_save, col_settle = st.columns([1, 1])
 
-        # Button 1: Manuelle Änderungen speichern
-        with col_save:
-            if st.button("💾 Manuelle Änderungen speichern"):
-                conn.update(data=edited_df)
-                st.success("Update erfolgreich!")
-                time.sleep(1)
-                st.rerun()
-
-        # Button 2: Alles Abrechnen
-        with col_settle:
-            if st.button("✅ Alle offenen Beträge als 'Erledigt' markieren", type="primary"):
-                with st.spinner("Setze alle Geldflüsse auf TRUE..."):
-                    # 1. Frische Daten laden
-                    fresh_df = load_data(ttl=0)
-                    
-                    # 2. Alles auf True setzen
-                    fresh_df["Rückerstattet"] = True
-                    fresh_df["ÜberschussÜbergeben"] = True
-                    
-                    # 3. Speichern
-                    conn.update(data=fresh_df)
-                    st.success("Alles abgerechnet!")
+            # Button 1: Manuelle Änderungen speichern
+            with col_save:
+                if st.button("💾 Manuelle Änderungen speichern"):
+                    conn.update(data=edited_df)
+                    st.success("Update erfolgreich!")
                     time.sleep(1)
                     st.rerun()
+
+            # Button 2: Alles Abrechnen
+            with col_settle:
+                if st.button("✅ Alle offenen Beträge als 'Erledigt' markieren", type="primary"):
+                    with st.spinner("Setze alle Geldflüsse auf TRUE..."):
+                        # 1. Frische Daten laden
+                        fresh_df = load_data(ttl=0)
+                        
+                        if not fresh_df.empty:
+                            # 2. Alles auf True setzen
+                            fresh_df["Rückerstattet"] = True
+                            fresh_df["ÜberschussÜbergeben"] = True
+                            
+                            # 3. Speichern
+                            conn.update(data=fresh_df)
+                            st.success("Alles abgerechnet!")
+                            time.sleep(1)
+                            st.rerun()
+                        else:
+                            st.error("Keine Daten zum Abrechnen.")
 
 # === TAB 3: ABRECHNUNG ===
 with tab3:
     st.subheader("Offene Beträge (Salden)")
     st.caption("Berechnung basiert nur auf vom Admin **bestätigten** Einträgen.")
 
-    tutors = sorted([t for t in df["Tutor"].unique() if t])
-    has_open_items = False
-    
-    for t in tutors:
-        # Filter: Tutor UND Bestätigt
-        t_df = df[(df["Tutor"] == t) & (df["Bestätigt"] == True)]
+    if df.empty:
+        st.info("Noch keine Einträge vorhanden.")
+    else:
+        tutors = sorted([t for t in df["Tutor"].unique() if t])
+        has_open_items = False
         
-        # Was hat Tutor ausgelegt und noch nicht wiederbekommen?
-        schulden_an_tutor = t_df[t_df["Rückerstattet"] == False]["Kosten"].sum()
+        for t in tutors:
+            # Filter: Tutor UND Bestätigt
+            t_df = df[(df["Tutor"] == t) & (df["Bestätigt"] == True)]
+            
+            if t_df.empty:
+                continue
+
+            # Was hat Tutor ausgelegt und noch nicht wiederbekommen?
+            schulden_an_tutor = t_df[t_df["Rückerstattet"] == False]["Kosten"].sum()
+            
+            # Was hat Tutor eingenommen und noch nicht abgegeben?
+            schulden_von_tutor = t_df[t_df["ÜberschussÜbergeben"] == False]["Einnahmen"].sum()
+            
+            saldo = schulden_an_tutor - schulden_von_tutor
+            
+            # Nur anzeigen, wenn es etwas zu tun gibt
+            if saldo != 0 or schulden_an_tutor > 0 or schulden_von_tutor > 0:
+                has_open_items = True
+                with st.container():
+                    c1, c2 = st.columns([3, 1])
+                    with c1:
+                        st.markdown(f"**{t}**")
+                        st.text(f"Auslagen offen: {schulden_an_tutor:.2f}€ | Einnahmen einbehalten: {schulden_von_tutor:.2f}€")
+                    with c2:
+                        if saldo > 0:
+                            st.success(f"Bekommt: {saldo:.2f} €")
+                        elif saldo < 0:
+                            st.error(f"Zahlt: {abs(saldo):.2f} €")
+                        else:
+                            st.info("Ausgeglichen (Verrechnet)")
+                    st.divider()
         
-        # Was hat Tutor eingenommen und noch nicht abgegeben?
-        schulden_von_tutor = t_df[t_df["ÜberschussÜbergeben"] == False]["Einnahmen"].sum()
-        
-        saldo = schulden_an_tutor - schulden_von_tutor
-        
-        # Nur anzeigen, wenn es etwas zu tun gibt
-        if saldo != 0 or schulden_an_tutor > 0 or schulden_von_tutor > 0:
-            has_open_items = True
-            with st.container():
-                c1, c2 = st.columns([3, 1])
-                with c1:
-                    st.markdown(f"**{t}**")
-                    st.text(f"Auslagen offen: {schulden_an_tutor:.2f}€ | Einnahmen einbehalten: {schulden_von_tutor:.2f}€")
-                with c2:
-                    if saldo > 0:
-                        st.success(f"Bekommt: {saldo:.2f} €")
-                    elif saldo < 0:
-                        st.error(f"Zahlt: {abs(saldo):.2f} €")
-                    else:
-                        st.info("Ausgeglichen (Verrechnet)")
-                st.divider()
-    
-    if not has_open_items:
-        st.success("Alles ausgeglichen! Keine offenen Schulden.")
+        if not has_open_items:
+            st.success("Alles ausgeglichen! Keine offenen Schulden.")
